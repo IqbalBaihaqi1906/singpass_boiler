@@ -47,12 +47,147 @@ class SingpassController {
         }
     }
 
-    static callback = async (req,res) => {
-        const code = req.query.code;
-        console.log(code)
-        res.status(200).json({
-            code : code
-        })
+    static callback = async (req,res,next) => {
+        try {
+            const cacheCtl = "no-cache";
+            const contentType = "application/x-www-form-urlencoded"; //header
+            const method = "POST";
+            const { code, state } = req.query;
+        
+            const url = `${process.env.MYINFO_API_TOKEN}?grant_type=authorization_code&code=${code}&redirect_uri=${process.env.MYINFO_APP_REDIRECT_URL}&client_id=${process.env.MYINFO_APP_CLIENT_ID}&client_secret=${process.env.MYINFO_APP_CLIENT_SECRET}`;
+        
+            // "grant_type=authorization_code" +
+            // "&code=" + code +
+            // "&redirect_uri=" + _redirectUrl +
+            // "&client_id=" + _clientId +
+            // "&client_secret=" + _clientSecret;
+        
+            const params = new URLSearchParams();
+            params.append('code', code);
+            params.append('grant_type', 'authorization_code');
+            params.append('client_id', process.env.MYINFO_APP_CLIENT_ID);
+            params.append('client_secret', process.env.MYINFO_APP_CLIENT_SECRET);
+            params.append('redirect_uri', process.env.MYINFO_APP_REDIRECT_URL);
+            params.append('state', state);
+
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Cache-Control': 'no-cache',
+            }
+
+            var authHeaders = null; 
+            if (_authLevel == "L0") {
+                // No headers
+            } else if (_authLevel == "L2") {
+                authHeaders = securityHelper.generateAuthorizationHeader(
+                _tokenApiUrl,
+                params,
+                method,
+                contentType,
+                _authLevel,
+                _clientId,
+                _privateKeyContent,
+                _clientSecret
+                );
+                headers.Authorization = authHeaders;
+            } else {
+                throw new Error("Unknown Auth Level");
+            }
+
+            
+            // console.log(headers)
+            console.log(params)
+        
+            const personData = await axios.post(process.env.MYINFO_API_TOKEN, params, {
+              headers: headers,
+            });
+
+            const accessToken = personData.data.access_token
+            console.log(personData)
+
+            var decoded = securityHelper.verifyJWS(accessToken, _publicCertContent);
+            if (decoded == undefined || decoded == null) {
+                res.jsonp({
+                status: "ERROR",
+                msg: "INVALID TOKEN"
+                })
+            }
+
+            console.log("Decoded Access Token:".green);
+            console.log(JSON.stringify(decoded));
+
+            var sub = decoded.sub;
+            if (sub == undefined || sub == null) {
+                res.jsonp({
+                status: "ERROR",
+                msg: "SUB NOT FOUND"
+                });
+            }
+
+
+            // REQUEST API PERSON
+            let personCall = {
+                url : _personApiUrl + "/" + sub + "/",
+                method : "GET",
+            }
+
+            const paramsPerson = new URLSearchParams();
+            paramsPerson.append('client_id', _clientId);
+            paramsPerson.append('attributes', _attributes);
+
+            // assemble headers for Person API
+            let headersPerson = {};
+
+            var authHeadersPerson = securityHelper.generateAuthorizationHeader(
+                personCall.url,
+                paramsPerson,
+                personCall.method,
+                "", // no content type needed for GET
+                _authLevel,
+                _clientId,
+                _privateKeyContent,
+                _clientSecret
+            );
+    
+            // NOTE: include access token in Authorization header as "Bearer " (with space behind)
+            if (!_.isEmpty(authHeadersPerson)) {
+                _.set(headersPerson, "Authorization", authHeadersPerson + ",Bearer " + accessToken);
+            } else {
+                _.set(headersPerson, "Authorization", "Bearer " + accessToken);
+            }
+
+            console.log(personCall)
+            console.log(paramsPerson)
+            console.log(headersPerson)
+
+            // const personDataCall = await axios({
+            //     url:personCall.url,
+            //     method:'get',
+            //     data : paramsPerson,
+            //     headers: {
+            //         'Cache-Control' : 'no-cache',
+            //         Authorization : headersPerson.Authorization
+            //     }
+            // });
+            const personDataCall = await axios.get(personCall.url, paramsPerson, {
+                headers: {
+                    'Cache-Control' : 'no-cache',
+                    Authorization : headersPerson.Authorization
+                },
+              });
+            
+            console.log(personDataCall)
+        
+            res.status(200).json({
+              code,
+              state,
+              personData: personData.data,
+              personCall : personDataCall
+            });
+          } catch (error) {
+            console.log(error.response.data);
+            next(error);
+          }
     }
 
     static getEnv = async (req,res) => {
@@ -121,7 +256,7 @@ class SingpassController {
             console.log("Contoh Access Token Sebelum Call Person API:".green);
             console.log(accessToken)
             // everything ok, call person API
-            callPersonAPI(accessToken, res);
+            this.callPersonAPI(accessToken, res);
         }
         });
         } catch (error) {
@@ -155,7 +290,7 @@ class SingpassController {
         }
 
         // **** CALL PERSON API ****
-        var request = createPersonRequest(sub, accessToken);
+        var request = this.createPersonRequest(sub, accessToken);
 
         // Invoke asynchronous call
         request
@@ -254,15 +389,15 @@ class SingpassController {
             const cacheCtl = "no-cache";
             const contentType = "application/x-www-form-urlencoded"; //header
             const method = "POST";
-            // console.log(_tokenApiUrl.green)
-            const data = {
+            console.log(_tokenApiUrl.green)
+            const params = {
                 grant_type:"authorization_code",
                 code : code,
                 redirect_uri : _redirectUrl,
                 client_id : _clientId,
                 client_secret : _clientSecret
             }
-            console.log(data)
+            // console.log(data)
             const headers = {
                 "Content-Type" : contentType,
                 "Cache-Control" : cacheCtl
@@ -307,27 +442,24 @@ class SingpassController {
             console.log(headers);
 
             // var request = restClient.post(_tokenApiUrl); // ilangin 
-            const request = await axios({
-                url : _tokenApiUrl,
-                method : 'POST',
-                data : data,
+            const request = await axios.post(_tokenApiUrl,params,{
                 headers : headers
-            });
+            })
 
             console.log(request)
 
-            // Set headers
-            if (!_.isUndefined(headers) && !_.isEmpty(headers))
-                request.set(headers);
+            // // Set headers
+            // if (!_.isUndefined(headers) && !_.isEmpty(headers))
+            //     request.set(headers);
 
-            // Set Params
-            if (!_.isUndefined(params) && !_.isEmpty(params))
-                request.send(params);
+            // // Set Params
+            // if (!_.isUndefined(params) && !_.isEmpty(params))
+            //     request.send(params);
 
-                console.log("Ini request dari create token:".green);
-                console.log(request)
+            console.log("Ini request dari create token:".green);
+            console.log(request)
             
-            return request.data;
+            return request;
         } catch (error) {
             throw error
         }
